@@ -538,11 +538,18 @@ else:
     with main_l:
 
         # Current hypothesis display
+        hyp_display = hypothesis.strip()
+        hyp_html = (
+            f'<div style="font-size:16px;font-weight:600;color:#111827;line-height:1.5;'
+            f'font-style:italic;">"{hyp_display}"</div>'
+            if hyp_display else
+            '<div style="font-size:14px;color:#9ca3af;font-style:italic;">'
+            'No hypothesis entered yet — analysis based on deviation summary only.</div>'
+        )
         render(f"""
         <div style="{CARD}border-left:4px solid #6b7280;">
           {overline("Current working hypothesis")}
-          <div style="font-size:16px;font-weight:600;color:#111827;line-height:1.5;
-              font-style:italic;">"{hypothesis.strip()}"</div>
+          {hyp_html}
           <div style="margin-top:10px;font-size:13px;color:#6b7280;">
             The scaffold examines whether this explanation is closing too early —
             and what pathways may be losing visibility as a result.
