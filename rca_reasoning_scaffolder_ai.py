@@ -1,6 +1,13 @@
-import re
+import json
+import os
+from typing import Dict, List, Tuple
+
 import streamlit as st
-from typing import List, Dict
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 
 st.set_page_config(
@@ -10,7 +17,7 @@ st.set_page_config(
 )
 
 # -----------------------------
-# Helper logic
+# Constants
 # -----------------------------
 INDIVIDUAL_BLAME_TERMS = [
     "operator error",
@@ -32,14 +39,19 @@ PROCEDURAL_TERMS = [
 
 CONTEXT_TERMS = [
     "environment", "temperature", "humidity", "timing", "shift", "room", "equipment",
-    "workflow", "handoff", "context", "condition"
+    "workflow", "handoff", "context", "condition", "monitoring"
 ]
 
 TRAINING_TERMS = [
     "training", "qualified", "qualification", "understanding", "interpretation"
 ]
 
+DEFAULT_MODEL = "gpt-5.4-mini"
 
+
+# -----------------------------
+# Helper logic
+# -----------------------------
 def normalize_text(text: str) -> str:
     return text.strip().lower()
 
@@ -78,19 +90,17 @@ def detect_compression_risk(hypothesis: str) -> Dict[str, str]:
 
 def generate_alternative_paths(summary: str, hypothesis: str) -> List[Dict[str, str]]:
     text = normalize_text(summary + " " + hypothesis)
-    paths = []
+    paths: List[Dict[str, str]] = []
 
-    # Always provide at least one procedural path
-    if any(term in text for term in PROCEDURAL_TERMS) or True:
-        paths.append({
-            "title": "Procedural / documentation pathway",
-            "desc": (
-                "The event may reflect ambiguity, fragmentation, or cross-reference burden in the procedure itself. "
-                "Investigate whether the task required users to integrate instructions across multiple sections or documents."
-            )
-        })
+    paths.append({
+        "title": "Procedural / documentation pathway",
+        "desc": (
+            "The event may reflect ambiguity, fragmentation, or cross-reference burden in the procedure itself. "
+            "Investigate whether the task required users to integrate instructions across multiple sections or documents."
+        )
+    })
 
-    if any(term in text for term in CONTEXT_TERMS) or "deviation" in text or "monitoring" in text:
+    if any(term in text for term in CONTEXT_TERMS) or "deviation" in text:
         paths.append({
             "title": "Contextual / workflow pathway",
             "desc": (
@@ -125,7 +135,6 @@ def generate_alternative_paths(summary: str, hypothesis: str) -> List[Dict[str, 
             )
         })
 
-    # Remove duplicates by title
     seen = set()
     deduped = []
     for path in paths:
@@ -156,7 +165,6 @@ def generate_next_evidence(summary: str, hypothesis: str) -> List[str]:
     if "entry" in text or "record" in text or "documentation" in text:
         evidence.append("Compare the original event with how it was later recorded in the deviation narrative.")
 
-    # remove duplicates
     deduped = []
     seen = set()
     for item in evidence:
@@ -177,11 +185,11 @@ def generate_unexplored_questions(summary: str, hypothesis: str) -> List[str]:
     ]
 
 
-def build_reasoning_map(summary: str, hypothesis: str):
+def build_reasoning_map(summary: str, hypothesis: str) -> Tuple[str, List[Dict[str, str]], List[str], List[str]]:
     current = hypothesis.strip() if hypothesis.strip() else "No current hypothesis entered."
 
     active_paths = generate_alternative_paths(summary, hypothesis)
-    narrowed = []
+    narrowed: List[str] = []
     risk = detect_compression_risk(hypothesis)
 
     if risk["level"] in ["High", "Moderate"]:
@@ -202,6 +210,114 @@ def build_reasoning_map(summary: str, hypothesis: str):
 
 
 # -----------------------------
+# LLM helper
+# -----------------------------
+def get_openai_client():
+    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
+    if not api_key:
+        return None
+    if OpenAI is None:
+        return None
+    return OpenAI(api_key=api_key)
+
+
+def build_llm_prompt(summary: str, hypothesis: str) -> str:
+    return f"""
+You are assisting with an RCA reasoning scaffold in a regulated environment.
+
+Your job is NOT to determine the final root cause.
+Do NOT give a final compliance decision.
+Do NOT collapse the explanation into one neat answer.
+Your role is to preserve reasoning space, identify possible premature accountability convergence, and suggest what additional evidence should be examined before closure.
+
+Return strict JSON with the following shape:
+{{
+  "alternative_pathways": [
+    {{"title": "short title", "desc": "1-2 sentence description"}},
+    {{"title": "short title", "desc": "1-2 sentence description"}},
+    {{"title": "short title", "desc": "1-2 sentence description"}}
+  ],
+  "pac_warning": "2-3 sentence warning about whether responsibility may be converging too early",
+  "next_evidence": [
+    "evidence item 1",
+    "evidence item 2",
+    "evidence item 3"
+  ],
+  "reopening_questions": [
+    "question 1",
+    "question 2",
+    "question 3"
+  ]
+}}
+
+Case summary:
+{summary}
+
+Current hypothesis:
+{hypothesis}
+""".strip()
+
+
+def parse_llm_json(raw_text: str) -> Dict[str, object]:
+    text = raw_text.strip()
+
+    if text.startswith("```"):
+        parts = text.split("```")
+        cleaned = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if part.lower() == "json":
+                continue
+            if part.lower().startswith("json\n"):
+                part = part[5:]
+            cleaned.append(part)
+        if cleaned:
+            text = cleaned[0].strip()
+
+    return json.loads(text)
+
+
+def run_llm_expansion(summary: str, hypothesis: str, model: str = DEFAULT_MODEL) -> Dict[str, object]:
+    client = get_openai_client()
+    if client is None:
+        raise RuntimeError(
+            "OpenAI client is not available. Set OPENAI_API_KEY and install the openai package."
+        )
+
+    prompt = build_llm_prompt(summary, hypothesis)
+
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "You are a reasoning-space scaffold for RCA. "
+                            "You expand possibilities and slow premature accountability convergence."
+                        )
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt}
+                ],
+            },
+        ],
+    )
+
+    raw_text = response.output_text
+    parsed = parse_llm_json(raw_text)
+    return parsed
+
+
+# -----------------------------
 # UI
 # -----------------------------
 st.title("🧠 RCA Reasoning Scaffolder")
@@ -214,19 +330,29 @@ with st.sidebar:
     st.subheader("Prototype framing")
     st.write(
         "Conventional RCA tools often compress explanation toward a single neat cause. "
-        "This scaffold explores the opposite design direction: AI/support logic that expands reasoning space instead of closing it too early."
+        "This scaffold explores the opposite design direction: support logic that expands reasoning space instead of closing it too early."
     )
-    st.info(
-        "Design principle: not decision replacement, but reasoning support."
+    st.info("Design principle: not decision replacement, but reasoning support.")
+
+    st.subheader("Experimental LLM mode")
+    st.write(
+        "The LLM button is optional. The main scaffold remains rule-based and stable. "
+        "The experimental mode generates richer alternative pathways and evidence prompts."
     )
 
 st.markdown("---")
 
+if "deviation_summary" not in st.session_state:
+    st.session_state.deviation_summary = ""
+if "current_hypothesis" not in st.session_state:
+    st.session_state.current_hypothesis = ""
+
 col1, col2 = st.columns([1.25, 1])
 
 with col1:
-    deviation_summary = st.text_area(
+    st.session_state.deviation_summary = st.text_area(
         "Deviation summary",
+        value=st.session_state.deviation_summary,
         placeholder=(
             "Example: During environmental monitoring review, sampling sequence may not have been followed correctly. "
             "The initial discussion quickly focused on operator error."
@@ -235,43 +361,52 @@ with col1:
     )
 
 with col2:
-    current_hypothesis = st.text_area(
+    st.session_state.current_hypothesis = st.text_area(
         "Investigator's current hypothesis",
+        value=st.session_state.current_hypothesis,
         placeholder="Example: Operator did not follow the sampling sequence correctly.",
         height=180
     )
 
-button_col1, button_col2, button_col3 = st.columns([1, 1, 2])
+button_col1, button_col2, button_col3 = st.columns([1, 1, 1.3])
 
 with button_col1:
     expand_clicked = st.button("Expand reasoning space", use_container_width=True)
 
 with button_col2:
-    sample_clicked = st.button("Load sample case", use_container_width=True)
+    load_sample_clicked = st.button("Load sample case", use_container_width=True)
 
-if sample_clicked:
-    deviation_summary = (
+with button_col3:
+    llm_clicked = st.button("Expand with LLM (experimental)", use_container_width=True)
+
+if load_sample_clicked:
+    st.session_state.deviation_summary = (
         "During environmental monitoring review, a deviation was identified involving possible sampling sequence issues. "
         "Initial discussion emphasized operator behavior, but the procedure required repeated cross-checking across sections, "
         "and surrounding room conditions may also have shifted during the event window."
     )
-    current_hypothesis = "Operator did not follow the sampling sequence correctly."
+    st.session_state.current_hypothesis = "Operator did not follow the sampling sequence correctly."
+    st.rerun()
+
+deviation_summary = st.session_state.deviation_summary
+current_hypothesis = st.session_state.current_hypothesis
 
 if not deviation_summary and not current_hypothesis:
     st.markdown("### What this prototype does")
-    st.write(
-        "Enter a deviation summary and a current hypothesis. The scaffold will:"
-    )
+    st.write("Enter a deviation summary and a current hypothesis. The scaffold will:")
     st.markdown(
         """
 - surface alternative contributing pathways
 - warn when reasoning seems to close too quickly around individual blame
 - suggest next evidence to examine
 - preserve a visible map of active and narrowed reasoning paths
+- optionally generate richer exploratory prompts with an LLM
         """
     )
 
-if expand_clicked or (deviation_summary and current_hypothesis):
+show_base = expand_clicked or llm_clicked or (deviation_summary and current_hypothesis)
+
+if show_base:
     st.markdown("---")
 
     risk = detect_compression_risk(current_hypothesis)
@@ -354,3 +489,64 @@ if expand_clicked or (deviation_summary and current_hypothesis):
         "This prototype explores the opposite direction: a support layer that keeps causal space open long enough "
         "to reduce premature accountability convergence."
     )
+
+if llm_clicked:
+    st.markdown("---")
+    st.markdown("### ✨ Experimental LLM expansion")
+
+    if not deviation_summary.strip() or not current_hypothesis.strip():
+        st.warning("Enter both a deviation summary and a current hypothesis first.")
+    else:
+        with st.spinner("Generating exploratory reasoning support..."):
+            try:
+                llm_result = run_llm_expansion(
+                    summary=deviation_summary,
+                    hypothesis=current_hypothesis,
+                    model=DEFAULT_MODEL
+                )
+
+                llm_alt = llm_result.get("alternative_pathways", [])
+                llm_warning = llm_result.get("pac_warning", "")
+                llm_evidence = llm_result.get("next_evidence", [])
+                llm_questions = llm_result.get("reopening_questions", [])
+
+                st.caption(
+                    "Experimental mode uses an LLM to generate richer scaffolding. "
+                    "This is not a final RCA answer and should not be used as closure."
+                )
+
+                if llm_warning:
+                    st.markdown("#### LLM PAC warning")
+                    st.info(llm_warning)
+
+                if llm_alt:
+                    st.markdown("#### LLM-generated alternative pathways")
+                    for i, path in enumerate(llm_alt, start=1):
+                        with st.container(border=True):
+                            st.markdown(f"##### {i}. {path.get('title', 'Untitled pathway')}")
+                            st.write(path.get("desc", ""))
+
+                llm_col1, llm_col2 = st.columns(2)
+
+                with llm_col1:
+                    st.markdown("#### LLM evidence prompts")
+                    if llm_evidence:
+                        for item in llm_evidence:
+                            st.write(f"- {item}")
+                    else:
+                        st.write("- No additional evidence prompts returned.")
+
+                with llm_col2:
+                    st.markdown("#### LLM reopening questions")
+                    if llm_questions:
+                        for item in llm_questions:
+                            st.write(f"- {item}")
+                    else:
+                        st.write("- No additional reopening questions returned.")
+
+            except Exception as e:
+                st.error("LLM expansion failed.")
+                st.code(str(e))
+                st.caption(
+                    "Check that OPENAI_API_KEY is set and that the openai package is installed."
+                )
