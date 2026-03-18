@@ -1,552 +1,722 @@
+"""
+PAC-Counter RCA Reasoning Scaffold
+AI expands reasoning space instead of converging toward a single cause.
+Design premise: conventional AI closes explanation. This scaffold opens it.
+
+Run: streamlit run pac_scaffold.py
+Optional: set ANTHROPIC_API_KEY for AI expansion mode
+"""
+
 import json
 import os
+import re
 from typing import Dict, List, Tuple
 
 import streamlit as st
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
-
-
 st.set_page_config(
-    page_title="RCA Reasoning Scaffolder",
-    page_icon="🧠",
-    layout="wide"
+    page_title="RCA Reasoning Scaffold",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# -----------------------------
+# =========================================================
 # Constants
-# -----------------------------
+# =========================================================
 INDIVIDUAL_BLAME_TERMS = [
-    "operator error",
-    "human error",
-    "analyst error",
-    "did not follow",
-    "failed to follow",
-    "careless",
-    "negligence",
-    "mistake by operator",
-    "employee mistake",
-    "technician mistake",
+    "operator error", "human error", "analyst error",
+    "did not follow", "failed to follow", "careless",
+    "negligence", "mistake by operator", "employee mistake",
+    "technician mistake", "user error", "personnel error",
 ]
 
-PROCEDURAL_TERMS = [
-    "procedure", "sop", "instruction", "sequence", "step", "cross-reference",
-    "ambiguous", "unclear", "fragmented", "documentation"
-]
+PROCEDURAL_TERMS   = ["procedure", "sop", "instruction", "sequence", "step",
+                       "cross-reference", "ambiguous", "unclear", "fragmented", "documentation"]
+CONTEXT_TERMS      = ["environment", "temperature", "humidity", "timing", "shift",
+                       "room", "equipment", "workflow", "handoff", "context", "condition", "monitoring"]
+TRAINING_TERMS     = ["training", "qualified", "qualification", "understanding", "interpretation"]
+EQUIPMENT_TERMS    = ["equipment", "instrument", "machine", "device"]
+RECORD_TERMS       = ["record", "documentation", "entry", "log"]
 
-CONTEXT_TERMS = [
-    "environment", "temperature", "humidity", "timing", "shift", "room", "equipment",
-    "workflow", "handoff", "context", "condition", "monitoring"
-]
-
-TRAINING_TERMS = [
-    "training", "qualified", "qualification", "understanding", "interpretation"
-]
-
-DEFAULT_MODEL = "gpt-5.4-mini"
-
-
-# -----------------------------
-# Helper logic
-# -----------------------------
-def normalize_text(text: str) -> str:
+# =========================================================
+# Rule-based logic (stable, no API needed)
+# =========================================================
+def normalize(text: str) -> str:
     return text.strip().lower()
 
-
-def detect_compression_risk(hypothesis: str) -> Dict[str, str]:
-    h = normalize_text(hypothesis)
-    matches = [term for term in INDIVIDUAL_BLAME_TERMS if term in h]
-
+def detect_pac_risk(hypothesis: str) -> Dict:
+    h = normalize(hypothesis)
+    matches = [t for t in INDIVIDUAL_BLAME_TERMS if t in h]
     if matches:
         return {
             "level": "High",
+            "color": "#dc2626",
+            "bg": "#fef2f2",
+            "border": "#fca5a5",
+            "label": "High convergence risk",
             "message": (
-                "Current reasoning appears to converge early on an individual actor. "
-                "Before closure, examine whether procedural, contextual, or organizational contributors remain underexplored."
-            )
+                "This hypothesis is converging early on an individual actor. "
+                "Procedural, contextual, and organizational contributors may be closing off "
+                "before they have been examined."
+            ),
+            "matched": matches,
         }
-
-    if any(word in h for word in ["operator", "analyst", "personnel", "staff"]):
+    if any(w in h for w in ["operator", "analyst", "personnel", "staff", "technician"]):
         return {
             "level": "Moderate",
+            "color": "#d97706",
+            "bg": "#fefce8",
+            "border": "#fde68a",
+            "label": "Moderate convergence risk",
             "message": (
-                "The current hypothesis foregrounds an individual actor. "
-                "This does not necessarily mean premature accountability convergence is occurring, "
-                "but alternative systemic contributors should remain visible."
-            )
+                "The hypothesis foregrounds an individual actor. "
+                "This does not necessarily indicate premature closure, "
+                "but systemic contributors should remain explicitly visible."
+            ),
+            "matched": [],
         }
-
     return {
         "level": "Low",
+        "color": "#16a34a",
+        "bg": "#f0fdf4",
+        "border": "#86efac",
+        "label": "Low convergence risk",
         "message": (
-            "The current hypothesis does not appear strongly compressed around individual blame. "
-            "Continue checking whether multiple causal pathways remain open."
-        )
+            "No strong individual-blame language detected. "
+            "Continue checking that multiple causal pathways remain open."
+        ),
+        "matched": [],
     }
 
-
-def generate_alternative_paths(summary: str, hypothesis: str) -> List[Dict[str, str]]:
-    text = normalize_text(summary + " " + hypothesis)
-    paths: List[Dict[str, str]] = []
+def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
+    text = normalize(summary + " " + hypothesis)
+    paths = []
 
     paths.append({
+        "id": "procedural",
         "title": "Procedural / documentation pathway",
+        "icon": "📄",
         "desc": (
-            "The event may reflect ambiguity, fragmentation, or cross-reference burden in the procedure itself. "
-            "Investigate whether the task required users to integrate instructions across multiple sections or documents."
-        )
+            "The event may reflect ambiguity, fragmentation, or cross-reference burden "
+            "in the procedure itself. Investigate whether the task required users to integrate "
+            "instructions across multiple sections or documents."
+        ),
+        "prompt": "What would this event look like if the procedure — not the person — was the primary contributor?",
     })
 
-    if any(term in text for term in CONTEXT_TERMS) or "deviation" in text:
+    if any(t in text for t in CONTEXT_TERMS) or "deviation" in text:
         paths.append({
+            "id": "contextual",
             "title": "Contextual / workflow pathway",
+            "icon": "🌡️",
             "desc": (
-                "The deviation may have been shaped by task conditions, environmental instability, timing pressure, "
-                "handoff issues, or surrounding workflow constraints rather than by a single isolated action."
-            )
+                "The deviation may have been shaped by task conditions, environmental instability, "
+                "timing pressure, handoff issues, or surrounding workflow constraints."
+            ),
+            "prompt": "What contextual or environmental conditions were present that could have shaped the outcome?",
         })
 
-    if any(term in text for term in TRAINING_TERMS) or "understand" in text or "misunder" in text:
+    if any(t in text for t in TRAINING_TERMS) or "understand" in text or "misunder" in text:
         paths.append({
+            "id": "interpretation",
             "title": "Interpretation / training pathway",
+            "icon": "🧩",
             "desc": (
-                "The issue may involve differences in procedural interpretation, incomplete conceptual understanding, "
-                "or a mismatch between formal training completion and practical interpretability."
-            )
+                "The issue may involve differences in procedural interpretation, incomplete conceptual "
+                "understanding, or a mismatch between formal training completion and practical interpretability."
+            ),
+            "prompt": "Could different investigators interpret the same procedure differently — and if so, why?",
         })
 
-    if "equipment" in text or "instrument" in text or "machine" in text or "device" in text:
+    if any(t in text for t in EQUIPMENT_TERMS):
         paths.append({
+            "id": "equipment",
             "title": "Equipment / interface pathway",
+            "icon": "⚙️",
             "desc": (
-                "The event may also involve equipment condition, instrument behavior, or interface design that shaped how the task was carried out."
-            )
+                "The event may involve equipment condition, instrument behavior, or interface design "
+                "that shaped how the task was carried out."
+            ),
+            "prompt": "How did the equipment or interface design constrain or shape the actor's available actions?",
         })
 
-    if "record" in text or "documentation" in text or "entry" in text or "log" in text:
+    if any(t in text for t in RECORD_TERMS):
         paths.append({
+            "id": "documentation",
             "title": "Documentation / recording pathway",
+            "icon": "📝",
             "desc": (
-                "The apparent issue may partly reflect how the event was documented, compressed, or later reconstructed, "
-                "rather than the original action alone."
-            )
+                "The apparent issue may partly reflect how the event was documented, compressed, or "
+                "later reconstructed, rather than the original action alone."
+            ),
+            "prompt": "How might the act of documenting this event have shaped how it is now being explained?",
         })
 
-    seen = set()
-    deduped = []
-    for path in paths:
-        if path["title"] not in seen:
-            deduped.append(path)
-            seen.add(path["title"])
+    # deduplicate
+    seen, out = set(), []
+    for p in paths:
+        if p["id"] not in seen:
+            out.append(p)
+            seen.add(p["id"])
+    return out[:5]
 
-    return deduped[:5]
-
-
-def generate_next_evidence(summary: str, hypothesis: str) -> List[str]:
-    text = normalize_text(summary + " " + hypothesis)
-    evidence = [
-        "Review adjacent SOP sections and cross-referenced documents.",
-        "Check whether alternative pathways were considered and then prematurely narrowed.",
-        "Examine what evidence would distinguish procedural ambiguity from individual noncompliance."
+def generate_evidence(summary: str, hypothesis: str) -> List[str]:
+    text = normalize(summary + " " + hypothesis)
+    ev = [
+        "Review the full SOP and all cross-referenced documents relevant to this task.",
+        "Identify what evidence would specifically distinguish procedural ambiguity from individual noncompliance.",
+        "Check whether alternative explanatory paths were raised and then prematurely narrowed.",
     ]
-
-    if "environment" in text or "monitoring" in text or "room" in text:
-        evidence.append("Review environmental logs and surrounding operating conditions near the event time.")
-
-    if "training" in text or "understand" in text or "operator" in text or "analyst" in text:
-        evidence.append("Examine training records together with how the procedure is actually interpreted in practice.")
-
-    if "equipment" in text or "instrument" in text:
-        evidence.append("Check equipment condition, interface usability, alarms, and maintenance history.")
-
-    if "entry" in text or "record" in text or "documentation" in text:
-        evidence.append("Compare the original event with how it was later recorded in the deviation narrative.")
-
-    deduped = []
-    seen = set()
-    for item in evidence:
+    if any(t in text for t in CONTEXT_TERMS):
+        ev.append("Review environmental logs and operating conditions during the event window.")
+    if any(t in text for t in TRAINING_TERMS) or "operator" in text or "analyst" in text:
+        ev.append("Examine training records alongside how the procedure is actually interpreted in practice.")
+    if any(t in text for t in EQUIPMENT_TERMS):
+        ev.append("Check equipment condition, interface usability, alarms, and maintenance history.")
+    if any(t in text for t in RECORD_TERMS):
+        ev.append("Compare the original event with how it was later recorded in the deviation narrative.")
+    seen, out = set(), []
+    for item in ev:
         if item not in seen:
-            deduped.append(item)
+            out.append(item)
             seen.add(item)
+    return out[:6]
 
-    return deduped[:6]
-
-
-def generate_unexplored_questions(summary: str, hypothesis: str) -> List[str]:
+def generate_questions() -> List[str]:
     return [
-        "What would this event look like if the procedure itself contributed to the deviation?",
-        "Which causal path is currently being treated as most obvious, and why?",
+        "What would this event look like if individual blame were temporarily set aside?",
+        "Which causal path is currently being treated as most obvious — and why?",
         "What relevant evidence has not yet been examined before narrowing toward closure?",
-        "Could documentation structure or workflow conditions have shaped the actor’s action?",
-        "What explanation would remain plausible if individual blame were temporarily set aside?"
+        "Could documentation structure or workflow conditions have shaped the actor's action?",
+        "If a different person had been in the same situation, would the same outcome have occurred?",
     ]
 
+# =========================================================
+# Anthropic API (optional expansion)
+# =========================================================
+def get_anthropic_key():
+    return os.getenv("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", None)
 
-def build_reasoning_map(summary: str, hypothesis: str) -> Tuple[str, List[Dict[str, str]], List[str], List[str]]:
-    current = hypothesis.strip() if hypothesis.strip() else "No current hypothesis entered."
+def run_claude_expansion(summary: str, hypothesis: str) -> Dict:
+    import anthropic
+    client = anthropic.Anthropic(api_key=get_anthropic_key())
 
-    active_paths = generate_alternative_paths(summary, hypothesis)
-    narrowed: List[str] = []
-    risk = detect_compression_risk(hypothesis)
-
-    if risk["level"] in ["High", "Moderate"]:
-        narrowed.append("Individual-actor explanation may be narrowing faster than surrounding system factors.")
-
-    if "operator error" in hypothesis.lower() or "human error" in hypothesis.lower():
-        narrowed.append("Responsibility may be converging before procedural ambiguity is ruled out.")
-
-    unexplored = [
-        "Procedural structure",
-        "Cross-document dependency",
-        "Workflow context",
-        "Interpretive burden",
-        "Evidence needed before closure"
-    ]
-
-    return current, active_paths, narrowed, unexplored
-
-
-# -----------------------------
-# LLM helper
-# -----------------------------
-def get_openai_client():
-    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
-    if not api_key:
-        return None
-    if OpenAI is None:
-        return None
-    return OpenAI(api_key=api_key)
-
-
-def build_llm_prompt(summary: str, hypothesis: str) -> str:
-    return f"""
-You are assisting with an RCA reasoning scaffold in a regulated environment.
+    prompt = f"""You are a reasoning-space scaffold for Root Cause Analysis (RCA) in regulated environments.
 
 Your job is NOT to determine the final root cause.
 Do NOT give a final compliance decision.
 Do NOT collapse the explanation into one neat answer.
-Your role is to preserve reasoning space, identify possible premature accountability convergence, and suggest what additional evidence should be examined before closure.
 
-Return strict JSON with the following shape:
+Your role: preserve reasoning space, identify possible premature accountability convergence (PAC), 
+and suggest what additional evidence should be examined before closure.
+
+Return ONLY valid JSON with this exact shape:
 {{
   "alternative_pathways": [
-    {{"title": "short title", "desc": "1-2 sentence description"}},
-    {{"title": "short title", "desc": "1-2 sentence description"}},
-    {{"title": "short title", "desc": "1-2 sentence description"}}
+    {{"title": "short title", "desc": "1-2 sentence description", "question": "one reopening question"}},
+    {{"title": "short title", "desc": "1-2 sentence description", "question": "one reopening question"}},
+    {{"title": "short title", "desc": "1-2 sentence description", "question": "one reopening question"}}
   ],
   "pac_warning": "2-3 sentence warning about whether responsibility may be converging too early",
-  "next_evidence": [
-    "evidence item 1",
-    "evidence item 2",
-    "evidence item 3"
-  ],
-  "reopening_questions": [
-    "question 1",
-    "question 2",
-    "question 3"
-  ]
+  "next_evidence": ["item 1", "item 2", "item 3"],
+  "reopening_questions": ["question 1", "question 2", "question 3"]
 }}
 
 Case summary:
 {summary}
 
 Current hypothesis:
-{hypothesis}
-""".strip()
+{hypothesis}"""
 
-
-def parse_llm_json(raw_text: str) -> Dict[str, object]:
-    text = raw_text.strip()
-
-    if text.startswith("```"):
-        parts = text.split("```")
-        cleaned = []
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            if part.lower() == "json":
-                continue
-            if part.lower().startswith("json\n"):
-                part = part[5:]
-            cleaned.append(part)
-        if cleaned:
-            text = cleaned[0].strip()
-
-    return json.loads(text)
-
-
-def run_llm_expansion(summary: str, hypothesis: str, model: str = DEFAULT_MODEL) -> Dict[str, object]:
-    client = get_openai_client()
-    if client is None:
-        raise RuntimeError(
-            "OpenAI client is not available. Set OPENAI_API_KEY and install the openai package."
-        )
-
-    prompt = build_llm_prompt(summary, hypothesis)
-
-    response = client.responses.create(
-        model=model,
-        input=[
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "You are a reasoning-space scaffold for RCA. "
-                            "You expand possibilities and slow premature accountability convergence."
-                        )
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt}
-                ],
-            },
-        ],
+    message = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}]
     )
 
-    raw_text = response.output_text
-    parsed = parse_llm_json(raw_text)
-    return parsed
+    raw = message.content[0].text.strip()
+    # strip markdown fences if present
+    raw = re.sub(r"^```(?:json)?\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    return json.loads(raw.strip())
 
+# =========================================================
+# HTML helpers
+# =========================================================
+CARD = ('background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;'
+        'padding:22px 24px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.05);')
 
-# -----------------------------
-# UI
-# -----------------------------
-st.title("🧠 RCA Reasoning Scaffolder")
-st.caption(
-    "A prototype for keeping reasoning space open during deviation investigations. "
-    "This tool does not determine the final cause. It is designed to slow premature accountability convergence."
-)
+def render(html: str):
+    st.markdown(html, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.subheader("Prototype framing")
-    st.write(
-        "Conventional RCA tools often compress explanation toward a single neat cause. "
-        "This scaffold explores the opposite design direction: support logic that expands reasoning space instead of closing it too early."
-    )
-    st.info("Design principle: not decision replacement, but reasoning support.")
+def overline(t: str) -> str:
+    return (f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.08em;color:#9ca3af;margin-bottom:8px;">{t}</div>')
 
-    st.subheader("Experimental LLM mode")
-    st.write(
-        "The LLM button is optional. The main scaffold remains rule-based and stable. "
-        "The experimental mode generates richer alternative pathways and evidence prompts."
-    )
+def heading(t: str, size="17px", mb="10px") -> str:
+    return (f'<div style="font-size:{size};font-weight:700;color:#111827;'
+            f'line-height:1.35;margin-bottom:{mb};">{t}</div>')
 
-st.markdown("---")
+def body(t: str) -> str:
+    return f'<div style="font-size:14px;color:#4b5563;line-height:1.7;">{t}</div>'
 
-if "deviation_summary" not in st.session_state:
-    st.session_state.deviation_summary = ""
-if "current_hypothesis" not in st.session_state:
-    st.session_state.current_hypothesis = ""
+def slabel(t: str, mt="14px") -> str:
+    return (f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.07em;color:#9ca3af;margin:{mt} 0 6px;">{t}</div>')
 
-col1, col2 = st.columns([1.25, 1])
+# =========================================================
+# CSS
+# =========================================================
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
+html, body, [data-testid="stAppViewContainer"], .stApp {
+    background: #f4f5f7 !important;
+    font-family: 'Inter', sans-serif !important;
+}
+[data-testid="stHeader"],[data-testid="stDecoration"],
+[data-testid="stToolbar"],footer { display:none !important; }
+
+.block-container { max-width:1360px !important; padding:24px 32px 40px !important; }
+[data-testid="stVerticalBlock"] > div:empty { display:none !important; }
+
+div[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stVerticalBlockBorderWrapper"] > div {
+    border:none !important; background:transparent !important;
+    box-shadow:none !important; padding:0 !important;
+    border-radius:0 !important; margin:0 !important;
+}
+
+div[data-testid="stButton"] > button {
+    font-family:'Inter',sans-serif !important;
+    font-size:14px !important; font-weight:600 !important;
+    color:#374151 !important; background:#ffffff !important;
+    border:1.5px solid #d1d5db !important; border-radius:9px !important;
+    padding:10px 18px !important; min-height:2.7rem !important;
+    box-shadow:0 1px 2px rgba(0,0,0,.05) !important;
+    transition:all .12s ease !important; width:100% !important;
+}
+div[data-testid="stButton"] > button:hover {
+    background:#f9fafb !important; border-color:#9ca3af !important; color:#111827 !important;
+}
+
+.stTextArea label {
+    font-size:14px !important; font-weight:600 !important; color:#374151 !important;
+}
+textarea {
+    font-family:'Inter',sans-serif !important; font-size:14px !important;
+    color:#1f2937 !important; background:#f9fafb !important;
+    border:1.5px solid #d1d5db !important; border-radius:9px !important;
+    padding:14px 16px !important; line-height:1.7 !important;
+}
+textarea:focus { border-color:#2563eb !important; outline:none !important; }
+
+p, li { font-size:14px !important; color:#4b5563 !important; line-height:1.7 !important; }
+
+/* PAC meter animation */
+@keyframes fill {
+    from { width: 0%; }
+    to   { width: var(--fill-w); }
+}
+.pac-bar-inner {
+    animation: fill 0.8s ease-out forwards;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# Session state
+# =========================================================
+if "summary" not in st.session_state:
+    st.session_state.summary = ""
+if "hypothesis" not in st.session_state:
+    st.session_state.hypothesis = ""
+if "ai_result" not in st.session_state:
+    st.session_state.ai_result = None
+if "toast_msg" not in st.session_state:
+    st.session_state.toast_msg = None
+
+if st.session_state.toast_msg:
+    st.toast(st.session_state.toast_msg)
+    st.session_state.toast_msg = None
+
+# =========================================================
+# Header
+# =========================================================
+render(f"""
+<div style="{CARD}margin-bottom:16px;">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;
+      flex-wrap:wrap;gap:16px;">
+    <div style="max-width:680px;">
+      {overline("RCA Reasoning Scaffold · PAC-Counter Design")}
+      <div style="font-size:24px;font-weight:700;color:#111827;letter-spacing:-.02em;
+          margin-bottom:6px;">
+        Reasoning Space Expander
+      </div>
+      <div style="font-size:15px;color:#4b5563;line-height:1.7;">
+        Conventional AI closes explanation — it converges toward a single neat cause.
+        This scaffold is designed to do the opposite:
+        <strong>keep multiple causal paths visible</strong> and surface premature
+        accountability convergence (PAC) before reasoning locks in.
+      </div>
+    </div>
+    <div style="background:#fafafa;border:1px solid #e5e7eb;border-radius:10px;
+        padding:14px 18px;min-width:220px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+          letter-spacing:.08em;color:#9ca3af;margin-bottom:8px;">Design premise</div>
+      <div style="font-size:13px;color:#374151;line-height:1.6;">
+        AI that <em>expands</em> reasoning space,<br>
+        not AI that <em>replaces</em> human judgment.<br><br>
+        Based on PAC framework — premature accountability convergence in regulated environments.
+      </div>
+    </div>
+  </div>
+</div>
+""")
+
+# =========================================================
+# Input section
+# =========================================================
+render(f'<div style="{CARD}margin-bottom:12px;">'
+       f'{overline("Step 1 — Enter the case")}'
+       f'{heading("Describe the deviation and the current working hypothesis")}'
+       f'{body("Be specific about what happened. The scaffold will analyse whether reasoning is closing too quickly around an individual actor.")}'
+       f'</div>')
+
+col1, col2 = st.columns(2, gap="large")
 with col1:
-    st.session_state.deviation_summary = st.text_area(
+    st.session_state.summary = st.text_area(
         "Deviation summary",
-        value=st.session_state.deviation_summary,
+        value=st.session_state.summary,
         placeholder=(
-            "Example: During environmental monitoring review, sampling sequence may not have been followed correctly. "
-            "The initial discussion quickly focused on operator error."
+            "Example: During environmental monitoring review, a deviation was identified "
+            "involving possible sampling sequence issues. Initial discussion emphasized operator behavior, "
+            "but the procedure required repeated cross-checking across sections."
         ),
-        height=180
+        height=160,
+        key="input_summary",
     )
-
 with col2:
-    st.session_state.current_hypothesis = st.text_area(
-        "Investigator's current hypothesis",
-        value=st.session_state.current_hypothesis,
-        placeholder="Example: Operator did not follow the sampling sequence correctly.",
-        height=180
+    st.session_state.hypothesis = st.text_area(
+        "Current working hypothesis",
+        value=st.session_state.hypothesis,
+        placeholder=(
+            "Example: Operator did not follow the sampling sequence correctly."
+        ),
+        height=160,
+        key="input_hypothesis",
     )
 
-button_col1, button_col2, button_col3 = st.columns([1, 1, 1.3])
-
-with button_col1:
-    expand_clicked = st.button("Expand reasoning space", use_container_width=True)
-
-with button_col2:
-    load_sample_clicked = st.button("Load sample case", use_container_width=True)
-
-with button_col3:
-    llm_clicked = st.button("Expand with LLM (experimental)", use_container_width=True)
-
-if load_sample_clicked:
-    st.session_state.deviation_summary = (
-        "During environmental monitoring review, a deviation was identified involving possible sampling sequence issues. "
-        "Initial discussion emphasized operator behavior, but the procedure required repeated cross-checking across sections, "
-        "and surrounding room conditions may also have shifted during the event window."
+b1, b2, b3 = st.columns([1, 1, 1.4], gap="small")
+with b1:
+    expand_clicked = st.button("🔍  Expand reasoning space", use_container_width=True, type="primary")
+with b2:
+    sample_clicked = st.button("Load sample case", use_container_width=True)
+with b3:
+    ai_clicked = st.button(
+        "✨  Expand with AI  (set ANTHROPIC_API_KEY)",
+        use_container_width=True,
+        disabled=(get_anthropic_key() is None),
     )
-    st.session_state.current_hypothesis = "Operator did not follow the sampling sequence correctly."
+
+if sample_clicked:
+    st.session_state.summary = (
+        "During environmental monitoring review, a deviation was identified involving possible "
+        "sampling sequence issues. Initial discussion emphasized operator behavior, but the procedure "
+        "required repeated cross-checking across sections, and surrounding room conditions may also "
+        "have shifted during the event window."
+    )
+    st.session_state.hypothesis = "Operator did not follow the sampling sequence correctly."
+    st.session_state.ai_result = None
+    st.session_state.toast_msg = "📋 Sample case loaded"
     st.rerun()
 
-deviation_summary = st.session_state.deviation_summary
-current_hypothesis = st.session_state.current_hypothesis
+summary    = st.session_state.summary
+hypothesis = st.session_state.hypothesis
 
-if not deviation_summary and not current_hypothesis:
-    st.markdown("### What this prototype does")
-    st.write("Enter a deviation summary and a current hypothesis. The scaffold will:")
-    st.markdown(
-        """
-- surface alternative contributing pathways
-- warn when reasoning seems to close too quickly around individual blame
-- suggest next evidence to examine
-- preserve a visible map of active and narrowed reasoning paths
-- optionally generate richer exploratory prompts with an LLM
-        """
-    )
+# =========================================================
+# AI expansion
+# =========================================================
+if ai_clicked and summary.strip() and hypothesis.strip():
+    with st.spinner("Generating reasoning expansion — this may take a moment..."):
+        try:
+            st.session_state.ai_result = run_claude_expansion(summary, hypothesis)
+            st.session_state.toast_msg = "✨ AI expansion complete"
+            st.rerun()
+        except Exception as e:
+            st.error(f"AI expansion failed: {e}")
 
-show_base = expand_clicked or llm_clicked or (deviation_summary and current_hypothesis)
+# =========================================================
+# Analysis output
+# =========================================================
+show = expand_clicked or ai_clicked or (summary.strip() and hypothesis.strip())
 
-if show_base:
-    st.markdown("---")
+if not show:
+    render(f"""
+    <div style="{CARD}margin-top:8px;background:#fafafa;border-color:#e5e7eb;">
+      {overline("How this works")}
+      {heading("Enter a case above to begin")}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-top:14px;">
+        <div style="padding:14px 16px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:9px;">
+          <div style="font-size:13px;font-weight:700;color:#1d4ed8;margin-bottom:4px;">1. PAC detection</div>
+          <div style="font-size:13px;color:#3b82f6;line-height:1.55;">
+            Identifies language that converges too early on individual blame.
+          </div>
+        </div>
+        <div style="padding:14px 16px;background:#f0fdf4;border:1px solid #86efac;border-radius:9px;">
+          <div style="font-size:13px;font-weight:700;color:#16a34a;margin-bottom:4px;">2. Pathway expansion</div>
+          <div style="font-size:13px;color:#15803d;line-height:1.55;">
+            Surfaces alternative causal pathways before reasoning closes.
+          </div>
+        </div>
+        <div style="padding:14px 16px;background:#fefce8;border:1px solid #fde68a;border-radius:9px;">
+          <div style="font-size:13px;font-weight:700;color:#d97706;margin-bottom:4px;">3. Evidence prompts</div>
+          <div style="font-size:13px;color:#b45309;line-height:1.55;">
+            Suggests what to examine before committing to a final explanation.
+          </div>
+        </div>
+      </div>
+    </div>
+    """)
 
-    risk = detect_compression_risk(current_hypothesis)
-    alt_paths = generate_alternative_paths(deviation_summary, current_hypothesis)
-    next_evidence = generate_next_evidence(deviation_summary, current_hypothesis)
-    questions = generate_unexplored_questions(deviation_summary, current_hypothesis)
-    current, active_paths, narrowed, unexplored = build_reasoning_map(deviation_summary, current_hypothesis)
+else:
+    risk     = detect_pac_risk(hypothesis)
+    pathways = generate_pathways(summary, hypothesis)
+    evidence = generate_evidence(summary, hypothesis)
+    questions = generate_questions()
 
-    risk_col, note_col = st.columns([0.9, 2.1])
+    render('<div style="height:8px;"></div>')
 
-    with risk_col:
-        if risk["level"] == "High":
-            st.error(f"PAC risk: {risk['level']}")
-        elif risk["level"] == "Moderate":
-            st.warning(f"PAC risk: {risk['level']}")
-        else:
-            st.success(f"PAC risk: {risk['level']}")
-
-    with note_col:
-        st.markdown("### Accountability compression warning")
-        st.write(risk["message"])
-
-    st.markdown("### Alternative contributing pathways")
-    for i, path in enumerate(alt_paths, start=1):
-        with st.container(border=True):
-            st.markdown(f"#### {i}. {path['title']}")
-            st.write(path["desc"])
-
-    lower_left, lower_right = st.columns(2)
-
-    with lower_left:
-        st.markdown("### What may be prematurely closed?")
-        if narrowed:
-            for item in narrowed:
-                st.write(f"- {item}")
-        else:
-            st.write("- No strong narrowing signal detected yet.")
-
-        st.markdown("### Questions to reopen reasoning space")
-        for q in questions:
-            st.write(f"- {q}")
-
-    with lower_right:
-        st.markdown("### Next evidence to examine")
-        for item in next_evidence:
-            st.write(f"- {item}")
-
-        st.markdown("### Design note")
-        st.caption(
-            "This scaffold does not select the final root cause. "
-            "It is intentionally designed to preserve multiple explanations before closure."
+    # ── PAC Risk meter ──────────────────────────────────────
+    risk_pct = {"High": 85, "Moderate": 50, "Low": 15}[risk["level"]]
+    matched_html = ""
+    if risk["matched"]:
+        terms = "".join(
+            f'<span style="display:inline-block;padding:2px 8px;background:#fee2e2;'
+            f'color:#991b1b;border-radius:4px;font-size:12px;font-weight:600;margin:2px 3px 2px 0;">'
+            f'{t}</span>'
+            for t in risk["matched"]
         )
+        matched_html = f'<div style="margin-top:10px;">{slabel("Flagged language", mt="0")}{terms}</div>'
 
-    st.markdown("---")
-    st.markdown("### Reasoning space snapshot")
+    render(f"""
+    <div style="background:{risk['bg']};border:1px solid {risk['border']};border-radius:12px;
+        padding:22px 24px;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;
+          flex-wrap:wrap;gap:12px;margin-bottom:14px;">
+        <div>
+          {overline("PAC Risk Assessment")}
+          <div style="font-size:20px;font-weight:700;color:{risk['color']};">{risk['label']}</div>
+        </div>
+        <div style="font-size:13px;color:{risk['color']};font-weight:600;
+            padding:6px 14px;background:rgba(255,255,255,.7);border-radius:7px;
+            border:1px solid {risk['border']};">
+          Convergence pressure: {risk_pct}%
+        </div>
+      </div>
+      <div style="background:rgba(255,255,255,.5);border-radius:6px;height:10px;
+          overflow:hidden;margin-bottom:12px;">
+        <div class="pac-bar-inner" style="--fill-w:{risk_pct}%;height:100%;
+            background:{risk['color']};border-radius:6px;"></div>
+      </div>
+      <div style="font-size:14px;color:#374151;line-height:1.65;">{risk['message']}</div>
+      {matched_html}
+    </div>
+    """)
 
-    snap_col1, snap_col2, snap_col3 = st.columns(3)
+    # ── Main 3-column layout ────────────────────────────────
+    main_l, main_r = st.columns([1.55, 1], gap="large")
 
-    with snap_col1:
-        with st.container(border=True):
-            st.markdown("#### Current hypothesis")
-            st.write(current)
+    with main_l:
 
-    with snap_col2:
-        with st.container(border=True):
-            st.markdown("#### Active pathways")
-            for path in active_paths:
-                st.write(f"- {path['title']}")
+        # Current hypothesis display
+        render(f"""
+        <div style="{CARD}border-left:4px solid #6b7280;">
+          {overline("Current working hypothesis")}
+          <div style="font-size:16px;font-weight:600;color:#111827;line-height:1.5;
+              font-style:italic;">"{hypothesis.strip()}"</div>
+          <div style="margin-top:10px;font-size:13px;color:#6b7280;">
+            The scaffold examines whether this explanation is closing too early —
+            and what pathways may be losing visibility as a result.
+          </div>
+        </div>
+        """)
 
-    with snap_col3:
-        with st.container(border=True):
-            st.markdown("#### Still unexplored")
-            for item in unexplored:
-                st.write(f"- {item}")
+        # Alternative pathways
+        render(f"""
+        <div style="font-size:13px;font-weight:700;text-transform:uppercase;
+            letter-spacing:.07em;color:#6b7280;margin-bottom:10px;">
+          Alternative causal pathways — keep these visible
+        </div>
+        """)
 
-    st.markdown("---")
-    st.markdown("### Why this matters")
-    st.write(
-        "In many RCA workflows, explanation pressure pushes investigators toward a single neat cause. "
-        "This prototype explores the opposite direction: a support layer that keeps causal space open long enough "
-        "to reduce premature accountability convergence."
-    )
+        for i, p in enumerate(pathways):
+            accent = ["#2563eb","#16a34a","#d97706","#7c3aed","#db2777"][i % 5]
+            accent_bg = ["#eff6ff","#f0fdf4","#fefce8","#f5f3ff","#fdf2f8"][i % 5]
+            accent_bdr = ["#bfdbfe","#86efac","#fde68a","#ddd6fe","#fbcfe8"][i % 5]
+            render(f"""
+            <div style="background:{accent_bg};border:1px solid {accent_bdr};
+                border-left:4px solid {accent};border-radius:12px;
+                padding:18px 20px;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <span style="font-size:18px;">{p['icon']}</span>
+                <div style="font-size:14px;font-weight:700;color:#111827;">{p['title']}</div>
+              </div>
+              <div style="font-size:14px;color:#374151;line-height:1.65;margin-bottom:10px;">
+                {p['desc']}
+              </div>
+              <div style="padding:10px 12px;background:rgba(255,255,255,.7);
+                  border-radius:7px;border:1px solid {accent_bdr};">
+                <span style="font-size:11px;font-weight:700;text-transform:uppercase;
+                    letter-spacing:.07em;color:{accent};">Reopening question  </span>
+                <span style="font-size:13px;color:#374151;font-style:italic;">
+                  {p['prompt']}
+                </span>
+              </div>
+            </div>
+            """)
 
-if llm_clicked:
-    st.markdown("---")
-    st.markdown("### ✨ Experimental LLM expansion")
+        # Reopening questions
+        render(f'<div style="height:4px;"></div>')
+        render(f"""
+        <div style="{CARD}">
+          {overline("Questions to reopen reasoning space")}
+          {heading("Before narrowing, ask:")}
+        """)
+        for q in questions:
+            render(f"""
+            <div style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #f3f4f6;">
+              <span style="color:#d97706;font-weight:700;font-size:15px;flex-shrink:0;">?</span>
+              <span style="font-size:14px;color:#374151;line-height:1.6;">{q}</span>
+            </div>
+            """)
+        render('</div>')
 
-    if not deviation_summary.strip() or not current_hypothesis.strip():
-        st.warning("Enter both a deviation summary and a current hypothesis first.")
-    else:
-        with st.spinner("Generating exploratory reasoning support..."):
-            try:
-                llm_result = run_llm_expansion(
-                    summary=deviation_summary,
-                    hypothesis=current_hypothesis,
-                    model=DEFAULT_MODEL
-                )
+    with main_r:
 
-                llm_alt = llm_result.get("alternative_pathways", [])
-                llm_warning = llm_result.get("pac_warning", "")
-                llm_evidence = llm_result.get("next_evidence", [])
-                llm_questions = llm_result.get("reopening_questions", [])
+        # Evidence to examine
+        render(f"""
+        <div style="{CARD}">
+          {overline("Evidence to examine first")}
+          {heading("Do not narrow until you have checked:")}
+        """)
+        for item in evidence:
+            render(f"""
+            <div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;">
+              <span style="color:#2563eb;font-weight:700;flex-shrink:0;">→</span>
+              <span style="font-size:14px;color:#374151;line-height:1.6;">{item}</span>
+            </div>
+            """)
+        render('</div>')
 
-                st.caption(
-                    "Experimental mode uses an LLM to generate richer scaffolding. "
-                    "This is not a final RCA answer and should not be used as closure."
-                )
+        # Reasoning state snapshot
+        render(f"""
+        <div style="{CARD}">
+          {overline("Reasoning space snapshot")}
+          {heading("What should remain open")}
+          <div style="margin-top:4px;">
+        """)
+        for p in pathways:
+            render(f"""
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+                background:#f9fafb;border-radius:7px;margin-bottom:5px;">
+              <span style="font-size:14px;">{p['icon']}</span>
+              <span style="font-size:13px;color:#374151;font-weight:500;">{p['title']}</span>
+              <span style="margin-left:auto;font-size:11px;font-weight:700;
+                  padding:2px 7px;background:#f0fdf4;color:#16a34a;
+                  border:1px solid #86efac;border-radius:4px;">OPEN</span>
+            </div>
+            """)
+        render('</div></div>')
 
-                if llm_warning:
-                    st.markdown("#### LLM PAC warning")
-                    st.info(llm_warning)
+        # Design note
+        render(f"""
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;
+            padding:18px 20px;">
+          {overline("Design note")}
+          <div style="font-size:13px;color:#64748b;line-height:1.65;">
+            This scaffold does not determine the root cause.
+            It is intentionally designed to <strong>resist premature closure</strong> —
+            the opposite of how most AI systems handle explanation tasks.<br><br>
+            Based on the PAC framework: AI systems that generate single-cause explanations
+            accelerate accountability convergence. This prototype explores the counter-design.
+          </div>
+        </div>
+        """)
 
-                if llm_alt:
-                    st.markdown("#### LLM-generated alternative pathways")
-                    for i, path in enumerate(llm_alt, start=1):
-                        with st.container(border=True):
-                            st.markdown(f"##### {i}. {path.get('title', 'Untitled pathway')}")
-                            st.write(path.get("desc", ""))
+    # ── AI expansion results ────────────────────────────────
+    if st.session_state.ai_result:
+        ai = st.session_state.ai_result
+        render('<div style="height:8px;"></div>')
+        render(f"""
+        <div style="background:#faf5ff;border:1px solid #ddd6fe;border-radius:12px;
+            padding:22px 24px;margin-bottom:12px;">
+          {overline("AI Expansion · Claude — reasoning space mode")}
+          {heading("AI-generated alternative pathways", size="18px")}
+          <div style="font-size:14px;color:#7c3aed;margin-bottom:16px;">
+            This AI is configured to expand reasoning, not conclude it.
+            It will not give you the answer — it will give you more questions.
+          </div>
+        </div>
+        """)
 
-                llm_col1, llm_col2 = st.columns(2)
+        ai_l, ai_r = st.columns([1.55, 1], gap="large")
 
-                with llm_col1:
-                    st.markdown("#### LLM evidence prompts")
-                    if llm_evidence:
-                        for item in llm_evidence:
-                            st.write(f"- {item}")
-                    else:
-                        st.write("- No additional evidence prompts returned.")
+        with ai_l:
+            if ai.get("pac_warning"):
+                render(f"""
+                <div style="background:#fef2f2;border:1px solid #fca5a5;border-left:4px solid #dc2626;
+                    border-radius:12px;padding:18px 20px;margin-bottom:12px;">
+                  {overline("AI PAC warning")}
+                  <div style="font-size:14px;color:#374151;line-height:1.65;">{ai['pac_warning']}</div>
+                </div>
+                """)
 
-                with llm_col2:
-                    st.markdown("#### LLM reopening questions")
-                    if llm_questions:
-                        for item in llm_questions:
-                            st.write(f"- {item}")
-                    else:
-                        st.write("- No additional reopening questions returned.")
+            for i, path in enumerate(ai.get("alternative_pathways", [])):
+                colors = ["#7c3aed","#0891b2","#059669"]
+                bgs    = ["#f5f3ff","#ecfeff","#ecfdf5"]
+                bdrs   = ["#ddd6fe","#a5f3fc","#a7f3d0"]
+                c = colors[i % 3]; bg = bgs[i % 3]; bdr = bdrs[i % 3]
+                render(f"""
+                <div style="background:{bg};border:1px solid {bdr};border-left:4px solid {c};
+                    border-radius:12px;padding:18px 20px;margin-bottom:8px;">
+                  <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">
+                    ✨ {path.get('title','')}
+                  </div>
+                  <div style="font-size:14px;color:#374151;line-height:1.65;margin-bottom:10px;">
+                    {path.get('desc','')}
+                  </div>
+                  {f'<div style="padding:10px 12px;background:rgba(255,255,255,.7);border-radius:7px;border:1px solid {bdr};font-size:13px;color:#374151;font-style:italic;">{path["question"]}</div>' if path.get("question") else ""}
+                </div>
+                """)
 
-            except Exception as e:
-                st.error("LLM expansion failed.")
-                st.code(str(e))
-                st.caption(
-                    "Check that OPENAI_API_KEY is set and that the openai package is installed."
-                )
+        with ai_r:
+            if ai.get("next_evidence"):
+                render(f"""
+                <div style="{CARD}">
+                  {overline("AI — evidence to examine")}
+                """)
+                for item in ai["next_evidence"]:
+                    render(f"""
+                    <div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;">
+                      <span style="color:#7c3aed;font-weight:700;flex-shrink:0;">→</span>
+                      <span style="font-size:14px;color:#374151;line-height:1.6;">{item}</span>
+                    </div>
+                    """)
+                render('</div>')
+
+            if ai.get("reopening_questions"):
+                render(f"""
+                <div style="{CARD}">
+                  {overline("AI — reopening questions")}
+                """)
+                for q in ai["reopening_questions"]:
+                    render(f"""
+                    <div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;">
+                      <span style="color:#d97706;font-weight:700;flex-shrink:0;">?</span>
+                      <span style="font-size:14px;color:#374151;line-height:1.6;">{q}</span>
+                    </div>
+                    """)
+                render('</div>')
