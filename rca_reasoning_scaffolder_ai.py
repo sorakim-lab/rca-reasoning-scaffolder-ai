@@ -387,7 +387,7 @@ render(f'<div style="{CARD}margin-bottom:12px;">'
 
 col1, col2 = st.columns(2, gap="large")
 with col1:
-    st.session_state.summary = st.text_area(
+    summary_input = st.text_area(
         "Deviation summary",
         value=st.session_state.summary,
         placeholder=(
@@ -398,8 +398,9 @@ with col1:
         height=160,
         key="input_summary",
     )
+    st.session_state.summary = summary_input
 with col2:
-    st.session_state.hypothesis = st.text_area(
+    hypothesis_input = st.text_area(
         "Current working hypothesis",
         value=st.session_state.hypothesis,
         placeholder=(
@@ -408,6 +409,7 @@ with col2:
         height=160,
         key="input_hypothesis",
     )
+    st.session_state.hypothesis = hypothesis_input
 
 b1, b2, b3 = st.columns([1, 1, 1.4], gap="small")
 with b1:
@@ -435,6 +437,7 @@ if sample_clicked:
 
 summary    = st.session_state.summary
 hypothesis = st.session_state.hypothesis
+# 하단 분석에서도 항상 최신 session_state 값 사용
 
 # =========================================================
 # AI expansion
@@ -451,7 +454,10 @@ if ai_clicked and summary.strip() and hypothesis.strip():
 # =========================================================
 # Analysis output
 # =========================================================
-show = expand_clicked or ai_clicked or (summary.strip() and hypothesis.strip())
+# show 조건: 버튼 클릭 OR session_state에 이미 내용이 있을 때
+show = expand_clicked or ai_clicked or (
+    st.session_state.summary.strip() and st.session_state.hypothesis.strip()
+)
 
 if not show:
     render(f"""
