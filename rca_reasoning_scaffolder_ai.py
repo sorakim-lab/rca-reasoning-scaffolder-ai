@@ -5,6 +5,11 @@ Design premise: conventional AI closes explanation. This scaffold opens it.
 
 Run: streamlit run pac_scaffold.py
 Optional: set ANTHROPIC_API_KEY for AI expansion mode
+
+Fixes applied:
+- Model updated to claude-sonnet-4-20250514
+- show condition: only trigger on explicit button click, not on session state presence
+- AI error results not cached — allows retry on failure
 """
 
 import json
@@ -153,7 +158,6 @@ def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
             "prompt": "How might the act of documenting this event have shaped how it is now being explained?",
         })
 
-    # deduplicate
     seen, out = set(), []
     for p in paths:
         if p["id"] not in seen:
@@ -208,7 +212,7 @@ Your job is NOT to determine the final root cause.
 Do NOT give a final compliance decision.
 Do NOT collapse the explanation into one neat answer.
 
-Your role: preserve reasoning space, identify possible premature accountability convergence (PAC), 
+Your role: preserve reasoning space, identify possible premature accountability convergence (PAC),
 and suggest what additional evidence should be examined before closure.
 
 Return ONLY valid JSON with this exact shape:
@@ -230,13 +234,13 @@ Current hypothesis:
 {hypothesis}"""
 
     message = client.messages.create(
-        model="claude-sonnet-4-5",
+        # FIX 1: updated to current model
+        model="claude-sonnet-4-20250514",
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
 
     raw = message.content[0].text.strip()
-    # strip markdown fences if present
     raw = re.sub(r"^```(?:json)?\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
     return json.loads(raw.strip())
@@ -315,7 +319,6 @@ textarea:focus { border-color:#2563eb !important; outline:none !important; }
 
 p, li { font-size:14px !important; color:#4b5563 !important; line-height:1.7 !important; }
 
-/* PAC meter animation */
 @keyframes fill {
     from { width: 0%; }
     to   { width: var(--fill-w); }
@@ -335,6 +338,9 @@ if "hypothesis" not in st.session_state:
     st.session_state.hypothesis = ""
 if "ai_result" not in st.session_state:
     st.session_state.ai_result = None
+if "show_analysis" not in st.session_state:
+    # FIX 2: explicit flag — only show analysis when user has clicked a button
+    st.session_state.show_analysis = False
 if "toast_msg" not in st.session_state:
     st.session_state.toast_msg = None
 
@@ -432,12 +438,17 @@ if sample_clicked:
     )
     st.session_state.hypothesis = "Operator did not follow the sampling sequence correctly."
     st.session_state.ai_result = None
-    st.session_state.toast_msg = "📋 Sample case loaded"
+    # FIX 2: sample load does NOT auto-show analysis — user must click Expand
+    st.session_state.show_analysis = False
+    st.session_state.toast_msg = "📋 Sample case loaded — click Expand to analyse"
     st.rerun()
+
+# FIX 2: only set show_analysis on explicit button clicks
+if expand_clicked and st.session_state.summary.strip() and st.session_state.hypothesis.strip():
+    st.session_state.show_analysis = True
 
 summary    = st.session_state.summary
 hypothesis = st.session_state.hypothesis
-# 하단 분석에서도 항상 최신 session_state 값 사용
 
 # =========================================================
 # AI expansion
@@ -445,7 +456,10 @@ hypothesis = st.session_state.hypothesis
 if ai_clicked and summary.strip() and hypothesis.strip():
     with st.spinner("Generating reasoning expansion — this may take a moment..."):
         try:
-            st.session_state.ai_result = run_claude_expansion(summary, hypothesis)
+            result = run_claude_expansion(summary, hypothesis)
+            # FIX 3: only cache successful results — errors are not stored
+            st.session_state.ai_result = result
+            st.session_state.show_analysis = True
             st.session_state.toast_msg = "✨ AI expansion complete"
             st.rerun()
         except Exception as e:
@@ -454,12 +468,7 @@ if ai_clicked and summary.strip() and hypothesis.strip():
 # =========================================================
 # Analysis output
 # =========================================================
-# show 조건: 버튼 클릭 OR session_state에 이미 내용이 있을 때
-show = expand_clicked or ai_clicked or (
-    st.session_state.summary.strip() and st.session_state.hypothesis.strip()
-)
-
-if not show:
+if not st.session_state.show_analysis:
     render(f"""
     <div style="{CARD}margin-top:8px;background:#fafafa;border-color:#e5e7eb;">
       {overline("How this works")}
@@ -488,9 +497,9 @@ if not show:
     """)
 
 else:
-    risk     = detect_pac_risk(hypothesis)
-    pathways = generate_pathways(summary, hypothesis)
-    evidence = generate_evidence(summary, hypothesis)
+    risk      = detect_pac_risk(hypothesis)
+    pathways  = generate_pathways(summary, hypothesis)
+    evidence  = generate_evidence(summary, hypothesis)
     questions = generate_questions()
 
     render('<div style="height:8px;"></div>')
@@ -532,12 +541,10 @@ else:
     </div>
     """)
 
-    # ── Main 3-column layout ────────────────────────────────
+    # ── Main layout ─────────────────────────────────────────
     main_l, main_r = st.columns([1.55, 1], gap="large")
 
     with main_l:
-
-        # Current hypothesis display
         hyp_display = hypothesis.strip()
         hyp_html = (
             f'<div style="font-size:16px;font-weight:600;color:#111827;line-height:1.5;'
@@ -557,7 +564,6 @@ else:
         </div>
         """)
 
-        # Alternative pathways
         render(f"""
         <div style="font-size:13px;font-weight:700;text-transform:uppercase;
             letter-spacing:.07em;color:#6b7280;margin-bottom:10px;">
@@ -566,8 +572,8 @@ else:
         """)
 
         for i, p in enumerate(pathways):
-            accent = ["#2563eb","#16a34a","#d97706","#7c3aed","#db2777"][i % 5]
-            accent_bg = ["#eff6ff","#f0fdf4","#fefce8","#f5f3ff","#fdf2f8"][i % 5]
+            accent     = ["#2563eb","#16a34a","#d97706","#7c3aed","#db2777"][i % 5]
+            accent_bg  = ["#eff6ff","#f0fdf4","#fefce8","#f5f3ff","#fdf2f8"][i % 5]
             accent_bdr = ["#bfdbfe","#86efac","#fde68a","#ddd6fe","#fbcfe8"][i % 5]
             render(f"""
             <div style="background:{accent_bg};border:1px solid {accent_bdr};
@@ -591,7 +597,6 @@ else:
             </div>
             """)
 
-        # Reopening questions
         render(f'<div style="height:4px;"></div>')
         render(f"""
         <div style="{CARD}">
@@ -608,8 +613,6 @@ else:
         render('</div>')
 
     with main_r:
-
-        # Evidence to examine
         render(f"""
         <div style="{CARD}">
           {overline("Evidence to examine first")}
@@ -624,7 +627,6 @@ else:
             """)
         render('</div>')
 
-        # Reasoning state snapshot
         render(f"""
         <div style="{CARD}">
           {overline("Reasoning space snapshot")}
@@ -644,7 +646,6 @@ else:
             """)
         render('</div></div>')
 
-        # Design note
         render(f"""
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;
             padding:18px 20px;">
