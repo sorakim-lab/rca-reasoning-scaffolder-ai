@@ -5,17 +5,13 @@ Design premise: conventional AI closes explanation. This scaffold opens it.
 
 Run: streamlit run pac_scaffold.py
 Optional: set ANTHROPIC_API_KEY for AI expansion mode
-
-Fixes applied:
-- Model updated to claude-sonnet-4-20250514
-- show condition: only trigger on explicit button click, not on session state presence
-- AI error results not cached — allows retry on failure
 """
 
+import html
 import json
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import streamlit as st
 
@@ -36,23 +32,76 @@ INDIVIDUAL_BLAME_TERMS = [
     "technician mistake", "user error", "personnel error",
 ]
 
-PROCEDURAL_TERMS   = ["procedure", "sop", "instruction", "sequence", "step",
-                       "cross-reference", "ambiguous", "unclear", "fragmented", "documentation"]
-CONTEXT_TERMS      = ["environment", "temperature", "humidity", "timing", "shift",
-                       "room", "equipment", "workflow", "handoff", "context", "condition", "monitoring"]
-TRAINING_TERMS     = ["training", "qualified", "qualification", "understanding", "interpretation"]
-EQUIPMENT_TERMS    = ["equipment", "instrument", "machine", "device"]
-RECORD_TERMS       = ["record", "documentation", "entry", "log"]
+PROCEDURAL_TERMS = [
+    "procedure", "sop", "instruction", "sequence", "step",
+    "cross-reference", "ambiguous", "unclear", "fragmented", "documentation"
+]
+
+CONTEXT_TERMS = [
+    "environment", "temperature", "humidity", "timing", "shift",
+    "room", "workflow", "handoff", "context", "condition", "monitoring"
+]
+
+TRAINING_TERMS = [
+    "training", "qualified", "qualification", "understanding", "interpretation"
+]
+
+EQUIPMENT_TERMS = [
+    "equipment", "instrument", "machine", "device"
+]
+
+RECORD_TERMS = [
+    "record", "documentation", "entry", "log"
+]
 
 # =========================================================
-# Rule-based logic (stable, no API needed)
+# Helpers
 # =========================================================
 def normalize(text: str) -> str:
     return text.strip().lower()
 
+def esc(text: str) -> str:
+    return html.escape(text or "").replace("\n", "<br>")
+
+def contains_any(text: str, terms: List[str]) -> bool:
+    return any(t in text for t in terms)
+
+def render(raw_html: str):
+    st.markdown(raw_html, unsafe_allow_html=True)
+
+def overline(t: str) -> str:
+    return (
+        f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:.08em;color:#9ca3af;margin-bottom:8px;">{esc(t)}</div>'
+    )
+
+def heading(t: str, size="17px", mb="10px") -> str:
+    return (
+        f'<div style="font-size:{size};font-weight:700;color:#111827;'
+        f'line-height:1.35;margin-bottom:{mb};">{esc(t)}</div>'
+    )
+
+def body(t: str) -> str:
+    return f'<div style="font-size:14px;color:#4b5563;line-height:1.7;">{esc(t)}</div>'
+
+def slabel(t: str, mt="14px") -> str:
+    return (
+        f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:.07em;color:#9ca3af;margin:{mt} 0 6px;">{esc(t)}</div>'
+    )
+
+CARD = (
+    "background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;"
+    "padding:22px 24px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.05);"
+)
+
+# =========================================================
+# Rule-based logic
+# =========================================================
 def detect_pac_risk(hypothesis: str) -> Dict:
     h = normalize(hypothesis)
     matches = [t for t in INDIVIDUAL_BLAME_TERMS if t in h]
+
     if matches:
         return {
             "level": "High",
@@ -67,6 +116,7 @@ def detect_pac_risk(hypothesis: str) -> Dict:
             ),
             "matched": matches,
         }
+
     if any(w in h for w in ["operator", "analyst", "personnel", "staff", "technician"]):
         return {
             "level": "Moderate",
@@ -81,6 +131,7 @@ def detect_pac_risk(hypothesis: str) -> Dict:
             ),
             "matched": [],
         }
+
     return {
         "level": "Low",
         "color": "#16a34a",
@@ -98,6 +149,7 @@ def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
     text = normalize(summary + " " + hypothesis)
     paths = []
 
+    # Always keep procedural path visible
     paths.append({
         "id": "procedural",
         "title": "Procedural / documentation pathway",
@@ -110,7 +162,7 @@ def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
         "prompt": "What would this event look like if the procedure — not the person — was the primary contributor?",
     })
 
-    if any(t in text for t in CONTEXT_TERMS) or "deviation" in text:
+    if contains_any(text, CONTEXT_TERMS) or "deviation" in text:
         paths.append({
             "id": "contextual",
             "title": "Contextual / workflow pathway",
@@ -122,7 +174,7 @@ def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
             "prompt": "What contextual or environmental conditions were present that could have shaped the outcome?",
         })
 
-    if any(t in text for t in TRAINING_TERMS) or "understand" in text or "misunder" in text:
+    if contains_any(text, TRAINING_TERMS) or "understand" in text or "misunder" in text:
         paths.append({
             "id": "interpretation",
             "title": "Interpretation / training pathway",
@@ -134,7 +186,7 @@ def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
             "prompt": "Could different investigators interpret the same procedure differently — and if so, why?",
         })
 
-    if any(t in text for t in EQUIPMENT_TERMS):
+    if contains_any(text, EQUIPMENT_TERMS):
         paths.append({
             "id": "equipment",
             "title": "Equipment / interface pathway",
@@ -146,7 +198,7 @@ def generate_pathways(summary: str, hypothesis: str) -> List[Dict]:
             "prompt": "How did the equipment or interface design constrain or shape the actor's available actions?",
         })
 
-    if any(t in text for t in RECORD_TERMS):
+    if contains_any(text, RECORD_TERMS):
         paths.append({
             "id": "documentation",
             "title": "Documentation / recording pathway",
@@ -172,14 +224,16 @@ def generate_evidence(summary: str, hypothesis: str) -> List[str]:
         "Identify what evidence would specifically distinguish procedural ambiguity from individual noncompliance.",
         "Check whether alternative explanatory paths were raised and then prematurely narrowed.",
     ]
-    if any(t in text for t in CONTEXT_TERMS):
+
+    if contains_any(text, CONTEXT_TERMS):
         ev.append("Review environmental logs and operating conditions during the event window.")
-    if any(t in text for t in TRAINING_TERMS) or "operator" in text or "analyst" in text:
+    if contains_any(text, TRAINING_TERMS) or "operator" in text or "analyst" in text:
         ev.append("Examine training records alongside how the procedure is actually interpreted in practice.")
-    if any(t in text for t in EQUIPMENT_TERMS):
+    if contains_any(text, EQUIPMENT_TERMS):
         ev.append("Check equipment condition, interface usability, alarms, and maintenance history.")
-    if any(t in text for t in RECORD_TERMS):
+    if contains_any(text, RECORD_TERMS):
         ev.append("Compare the original event with how it was later recorded in the deviation narrative.")
+
     seen, out = set(), []
     for item in ev:
         if item not in seen:
@@ -197,13 +251,32 @@ def generate_questions() -> List[str]:
     ]
 
 # =========================================================
-# Anthropic API (optional expansion)
+# Anthropic API
 # =========================================================
 def get_anthropic_key():
-    return os.getenv("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", None)
+    secrets_obj = getattr(st, "secrets", {})
+    try:
+        secret_key = secrets_obj.get("ANTHROPIC_API_KEY", None)
+    except Exception:
+        secret_key = None
+    return os.getenv("ANTHROPIC_API_KEY") or secret_key
+
+def extract_json_object(raw: str) -> Dict:
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
 
 def run_claude_expansion(summary: str, hypothesis: str) -> Dict:
     import anthropic
+
     client = anthropic.Anthropic(api_key=get_anthropic_key())
 
     prompt = f"""You are a reasoning-space scaffold for Root Cause Analysis (RCA) in regulated environments.
@@ -234,40 +307,17 @@ Current hypothesis:
 {hypothesis}"""
 
     message = client.messages.create(
-        # FIX 1: updated to current model
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw = message.content[0].text.strip()
-    raw = re.sub(r"^```(?:json)?\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw)
-    return json.loads(raw.strip())
+    content_blocks = getattr(message, "content", None)
+    if not content_blocks:
+        raise ValueError("Claude response did not include content.")
 
-# =========================================================
-# HTML helpers
-# =========================================================
-CARD = ('background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;'
-        'padding:22px 24px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.05);')
-
-def render(html: str):
-    st.markdown(html, unsafe_allow_html=True)
-
-def overline(t: str) -> str:
-    return (f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.08em;color:#9ca3af;margin-bottom:8px;">{t}</div>')
-
-def heading(t: str, size="17px", mb="10px") -> str:
-    return (f'<div style="font-size:{size};font-weight:700;color:#111827;'
-            f'line-height:1.35;margin-bottom:{mb};">{t}</div>')
-
-def body(t: str) -> str:
-    return f'<div style="font-size:14px;color:#4b5563;line-height:1.7;">{t}</div>'
-
-def slabel(t: str, mt="14px") -> str:
-    return (f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.07em;color:#9ca3af;margin:{mt} 0 6px;">{t}</div>')
+    raw = content_blocks[0].text.strip()
+    return extract_json_object(raw)
 
 # =========================================================
 # CSS
@@ -332,17 +382,18 @@ p, li { font-size:14px !important; color:#4b5563 !important; line-height:1.7 !im
 # =========================================================
 # Session state
 # =========================================================
-if "summary" not in st.session_state:
-    st.session_state.summary = ""
-if "hypothesis" not in st.session_state:
-    st.session_state.hypothesis = ""
-if "ai_result" not in st.session_state:
-    st.session_state.ai_result = None
-if "show_analysis" not in st.session_state:
-    # FIX 2: explicit flag — only show analysis when user has clicked a button
-    st.session_state.show_analysis = False
-if "toast_msg" not in st.session_state:
-    st.session_state.toast_msg = None
+defaults = {
+    "summary": "",
+    "hypothesis": "",
+    "ai_result": None,
+    "show_analysis": False,
+    "toast_msg": None,
+    "last_summary": "",
+    "last_hypothesis": "",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 if st.session_state.toast_msg:
     st.toast(st.session_state.toast_msg)
@@ -353,12 +404,10 @@ if st.session_state.toast_msg:
 # =========================================================
 render(f"""
 <div style="{CARD}margin-bottom:16px;">
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;
-      flex-wrap:wrap;gap:16px;">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;">
     <div style="max-width:680px;">
       {overline("RCA Reasoning Scaffold · PAC-Counter Design")}
-      <div style="font-size:24px;font-weight:700;color:#111827;letter-spacing:-.02em;
-          margin-bottom:6px;">
+      <div style="font-size:24px;font-weight:700;color:#111827;letter-spacing:-.02em;margin-bottom:6px;">
         Reasoning Space Expander
       </div>
       <div style="font-size:15px;color:#4b5563;line-height:1.7;">
@@ -368,10 +417,8 @@ render(f"""
         accountability convergence (PAC) before reasoning locks in.
       </div>
     </div>
-    <div style="background:#fafafa;border:1px solid #e5e7eb;border-radius:10px;
-        padding:14px 18px;min-width:220px;">
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;
-          letter-spacing:.08em;color:#9ca3af;margin-bottom:8px;">Design premise</div>
+    <div style="background:#fafafa;border:1px solid #e5e7eb;border-radius:10px;padding:14px 18px;min-width:220px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#9ca3af;margin-bottom:8px;">Design premise</div>
       <div style="font-size:13px;color:#374151;line-height:1.6;">
         AI that <em>expands</em> reasoning space,<br>
         not AI that <em>replaces</em> human judgment.<br><br>
@@ -385,11 +432,13 @@ render(f"""
 # =========================================================
 # Input section
 # =========================================================
-render(f'<div style="{CARD}margin-bottom:12px;">'
-       f'{overline("Step 1 — Enter the case")}'
-       f'{heading("Describe the deviation and the current working hypothesis")}'
-       f'{body("Be specific about what happened. The scaffold will analyse whether reasoning is closing too quickly around an individual actor.")}'
-       f'</div>')
+render(
+    f'<div style="{CARD}margin-bottom:12px;">'
+    f'{overline("Step 1 — Enter the case")}'
+    f'{heading("Describe the deviation and the current working hypothesis")}'
+    f'{body("Be specific about what happened. The scaffold will analyse whether reasoning is closing too quickly around an individual actor.")}'
+    f'</div>'
+)
 
 col1, col2 = st.columns(2, gap="large")
 with col1:
@@ -404,18 +453,27 @@ with col1:
         height=160,
         key="input_summary",
     )
-    st.session_state.summary = summary_input
+
 with col2:
     hypothesis_input = st.text_area(
         "Current working hypothesis",
         value=st.session_state.hypothesis,
-        placeholder=(
-            "Example: Operator did not follow the sampling sequence correctly."
-        ),
+        placeholder="Example: Operator did not follow the sampling sequence correctly.",
         height=160,
         key="input_hypothesis",
     )
-    st.session_state.hypothesis = hypothesis_input
+
+# Reset stale AI result when input changes
+if (
+    summary_input != st.session_state.last_summary
+    or hypothesis_input != st.session_state.last_hypothesis
+):
+    st.session_state.ai_result = None
+
+st.session_state.summary = summary_input
+st.session_state.hypothesis = hypothesis_input
+st.session_state.last_summary = summary_input
+st.session_state.last_hypothesis = hypothesis_input
 
 b1, b2, b3 = st.columns([1, 1, 1.4], gap="small")
 with b1:
@@ -437,33 +495,36 @@ if sample_clicked:
         "have shifted during the event window."
     )
     st.session_state.hypothesis = "Operator did not follow the sampling sequence correctly."
+    st.session_state.last_summary = st.session_state.summary
+    st.session_state.last_hypothesis = st.session_state.hypothesis
     st.session_state.ai_result = None
-    # FIX 2: sample load does NOT auto-show analysis — user must click Expand
     st.session_state.show_analysis = False
     st.session_state.toast_msg = "📋 Sample case loaded — click Expand to analyse"
     st.rerun()
 
-# FIX 2: only set show_analysis on explicit button clicks
-if expand_clicked and st.session_state.summary.strip() and st.session_state.hypothesis.strip():
-    st.session_state.show_analysis = True
-
-summary    = st.session_state.summary
+summary = st.session_state.summary
 hypothesis = st.session_state.hypothesis
 
-# =========================================================
-# AI expansion
-# =========================================================
-if ai_clicked and summary.strip() and hypothesis.strip():
-    with st.spinner("Generating reasoning expansion — this may take a moment..."):
-        try:
-            result = run_claude_expansion(summary, hypothesis)
-            # FIX 3: only cache successful results — errors are not stored
-            st.session_state.ai_result = result
-            st.session_state.show_analysis = True
-            st.session_state.toast_msg = "✨ AI expansion complete"
-            st.rerun()
-        except Exception as e:
-            st.error(f"AI expansion failed: {e}")
+if expand_clicked:
+    if summary.strip() and hypothesis.strip():
+        st.session_state.show_analysis = True
+    else:
+        st.warning("Please enter both the deviation summary and the current working hypothesis.")
+
+if ai_clicked:
+    if not summary.strip() or not hypothesis.strip():
+        st.warning("Please enter both the deviation summary and the current working hypothesis.")
+    else:
+        st.session_state.show_analysis = True
+        st.session_state.ai_result = None
+        with st.spinner("Generating reasoning expansion — this may take a moment..."):
+            try:
+                result = run_claude_expansion(summary, hypothesis)
+                st.session_state.ai_result = result
+                st.session_state.toast_msg = "✨ AI expansion complete"
+                st.rerun()
+            except Exception as e:
+                st.error(f"AI expansion failed: {e}")
 
 # =========================================================
 # Analysis output
@@ -495,64 +556,55 @@ if not st.session_state.show_analysis:
       </div>
     </div>
     """)
-
 else:
-    risk      = detect_pac_risk(hypothesis)
-    pathways  = generate_pathways(summary, hypothesis)
-    evidence  = generate_evidence(summary, hypothesis)
+    risk = detect_pac_risk(hypothesis)
+    pathways = generate_pathways(summary, hypothesis)
+    evidence = generate_evidence(summary, hypothesis)
     questions = generate_questions()
 
     render('<div style="height:8px;"></div>')
 
-    # ── PAC Risk meter ──────────────────────────────────────
     risk_pct = {"High": 85, "Moderate": 50, "Low": 15}[risk["level"]]
+
     matched_html = ""
     if risk["matched"]:
         terms = "".join(
             f'<span style="display:inline-block;padding:2px 8px;background:#fee2e2;'
             f'color:#991b1b;border-radius:4px;font-size:12px;font-weight:600;margin:2px 3px 2px 0;">'
-            f'{t}</span>'
+            f'{esc(t)}</span>'
             for t in risk["matched"]
         )
         matched_html = f'<div style="margin-top:10px;">{slabel("Flagged language", mt="0")}{terms}</div>'
 
     render(f"""
-    <div style="background:{risk['bg']};border:1px solid {risk['border']};border-radius:12px;
-        padding:22px 24px;margin-bottom:12px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;
-          flex-wrap:wrap;gap:12px;margin-bottom:14px;">
+    <div style="background:{risk['bg']};border:1px solid {risk['border']};border-radius:12px;padding:22px 24px;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:14px;">
         <div>
           {overline("PAC Risk Assessment")}
-          <div style="font-size:20px;font-weight:700;color:{risk['color']};">{risk['label']}</div>
+          <div style="font-size:20px;font-weight:700;color:{risk['color']};">{esc(risk['label'])}</div>
         </div>
-        <div style="font-size:13px;color:{risk['color']};font-weight:600;
-            padding:6px 14px;background:rgba(255,255,255,.7);border-radius:7px;
-            border:1px solid {risk['border']};">
+        <div style="font-size:13px;color:{risk['color']};font-weight:600;padding:6px 14px;background:rgba(255,255,255,.7);border-radius:7px;border:1px solid {risk['border']};">
           Convergence pressure: {risk_pct}%
         </div>
       </div>
-      <div style="background:rgba(255,255,255,.5);border-radius:6px;height:10px;
-          overflow:hidden;margin-bottom:12px;">
-        <div class="pac-bar-inner" style="--fill-w:{risk_pct}%;height:100%;
-            background:{risk['color']};border-radius:6px;"></div>
+      <div style="background:rgba(255,255,255,.5);border-radius:6px;height:10px;overflow:hidden;margin-bottom:12px;">
+        <div class="pac-bar-inner" style="--fill-w:{risk_pct}%;height:100%;background:{risk['color']};border-radius:6px;"></div>
       </div>
-      <div style="font-size:14px;color:#374151;line-height:1.65;">{risk['message']}</div>
+      <div style="font-size:14px;color:#374151;line-height:1.65;">{esc(risk['message'])}</div>
       {matched_html}
     </div>
     """)
 
-    # ── Main layout ─────────────────────────────────────────
     main_l, main_r = st.columns([1.55, 1], gap="large")
 
     with main_l:
         hyp_display = hypothesis.strip()
         hyp_html = (
-            f'<div style="font-size:16px;font-weight:600;color:#111827;line-height:1.5;'
-            f'font-style:italic;">"{hyp_display}"</div>'
+            f'<div style="font-size:16px;font-weight:600;color:#111827;line-height:1.5;font-style:italic;">"{esc(hyp_display)}"</div>'
             if hyp_display else
-            '<div style="font-size:14px;color:#9ca3af;font-style:italic;">'
-            'No hypothesis entered yet — analysis based on deviation summary only.</div>'
+            '<div style="font-size:14px;color:#9ca3af;font-style:italic;">No hypothesis entered yet — analysis based on deviation summary only.</div>'
         )
+
         render(f"""
         <div style="{CARD}border-left:4px solid #6b7280;">
           {overline("Current working hypothesis")}
@@ -564,34 +616,30 @@ else:
         </div>
         """)
 
-        render(f"""
-        <div style="font-size:13px;font-weight:700;text-transform:uppercase;
-            letter-spacing:.07em;color:#6b7280;margin-bottom:10px;">
+        render("""
+        <div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;margin-bottom:10px;">
           Alternative causal pathways — keep these visible
         </div>
         """)
 
         for i, p in enumerate(pathways):
-            accent     = ["#2563eb","#16a34a","#d97706","#7c3aed","#db2777"][i % 5]
-            accent_bg  = ["#eff6ff","#f0fdf4","#fefce8","#f5f3ff","#fdf2f8"][i % 5]
-            accent_bdr = ["#bfdbfe","#86efac","#fde68a","#ddd6fe","#fbcfe8"][i % 5]
+            accent = ["#2563eb", "#16a34a", "#d97706", "#7c3aed", "#db2777"][i % 5]
+            accent_bg = ["#eff6ff", "#f0fdf4", "#fefce8", "#f5f3ff", "#fdf2f8"][i % 5]
+            accent_bdr = ["#bfdbfe", "#86efac", "#fde68a", "#ddd6fe", "#fbcfe8"][i % 5]
+
             render(f"""
-            <div style="background:{accent_bg};border:1px solid {accent_bdr};
-                border-left:4px solid {accent};border-radius:12px;
-                padding:18px 20px;margin-bottom:8px;">
+            <div style="background:{accent_bg};border:1px solid {accent_bdr};border-left:4px solid {accent};border-radius:12px;padding:18px 20px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                <span style="font-size:18px;">{p['icon']}</span>
-                <div style="font-size:14px;font-weight:700;color:#111827;">{p['title']}</div>
+                <span style="font-size:18px;">{esc(p['icon'])}</span>
+                <div style="font-size:14px;font-weight:700;color:#111827;">{esc(p['title'])}</div>
               </div>
               <div style="font-size:14px;color:#374151;line-height:1.65;margin-bottom:10px;">
-                {p['desc']}
+                {esc(p['desc'])}
               </div>
-              <div style="padding:10px 12px;background:rgba(255,255,255,.7);
-                  border-radius:7px;border:1px solid {accent_bdr};">
-                <span style="font-size:11px;font-weight:700;text-transform:uppercase;
-                    letter-spacing:.07em;color:{accent};">Reopening question  </span>
+              <div style="padding:10px 12px;background:rgba(255,255,255,.7);border-radius:7px;border:1px solid {accent_bdr};">
+                <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:{accent};">Reopening question  </span>
                 <span style="font-size:13px;color:#374151;font-style:italic;">
-                  {p['prompt']}
+                  {esc(p['prompt'])}
                 </span>
               </div>
             </div>
@@ -603,14 +651,16 @@ else:
           {overline("Questions to reopen reasoning space")}
           {heading("Before narrowing, ask:")}
         """)
+
         for q in questions:
             render(f"""
             <div style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid #f3f4f6;">
               <span style="color:#d97706;font-weight:700;font-size:15px;flex-shrink:0;">?</span>
-              <span style="font-size:14px;color:#374151;line-height:1.6;">{q}</span>
+              <span style="font-size:14px;color:#374151;line-height:1.6;">{esc(q)}</span>
             </div>
             """)
-        render('</div>')
+
+        render("</div>")
 
     with main_r:
         render(f"""
@@ -618,14 +668,16 @@ else:
           {overline("Evidence to examine first")}
           {heading("Do not narrow until you have checked:")}
         """)
+
         for item in evidence:
             render(f"""
             <div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;">
               <span style="color:#2563eb;font-weight:700;flex-shrink:0;">→</span>
-              <span style="font-size:14px;color:#374151;line-height:1.6;">{item}</span>
+              <span style="font-size:14px;color:#374151;line-height:1.6;">{esc(item)}</span>
             </div>
             """)
-        render('</div>')
+
+        render("</div>")
 
         render(f"""
         <div style="{CARD}">
@@ -633,22 +685,20 @@ else:
           {heading("What should remain open")}
           <div style="margin-top:4px;">
         """)
+
         for p in pathways:
             render(f"""
-            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;
-                background:#f9fafb;border-radius:7px;margin-bottom:5px;">
-              <span style="font-size:14px;">{p['icon']}</span>
-              <span style="font-size:13px;color:#374151;font-weight:500;">{p['title']}</span>
-              <span style="margin-left:auto;font-size:11px;font-weight:700;
-                  padding:2px 7px;background:#f0fdf4;color:#16a34a;
-                  border:1px solid #86efac;border-radius:4px;">OPEN</span>
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#f9fafb;border-radius:7px;margin-bottom:5px;">
+              <span style="font-size:14px;">{esc(p['icon'])}</span>
+              <span style="font-size:13px;color:#374151;font-weight:500;">{esc(p['title'])}</span>
+              <span style="margin-left:auto;font-size:11px;font-weight:700;padding:2px 7px;background:#f0fdf4;color:#16a34a;border:1px solid #86efac;border-radius:4px;">OPEN</span>
             </div>
             """)
-        render('</div></div>')
+
+        render("</div></div>")
 
         render(f"""
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;
-            padding:18px 20px;">
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:18px 20px;">
           {overline("Design note")}
           <div style="font-size:13px;color:#64748b;line-height:1.65;">
             This scaffold does not determine the root cause.
@@ -660,13 +710,11 @@ else:
         </div>
         """)
 
-    # ── AI expansion results ────────────────────────────────
     if st.session_state.ai_result:
         ai = st.session_state.ai_result
         render('<div style="height:8px;"></div>')
         render(f"""
-        <div style="background:#faf5ff;border:1px solid #ddd6fe;border-radius:12px;
-            padding:22px 24px;margin-bottom:12px;">
+        <div style="background:#faf5ff;border:1px solid #ddd6fe;border-radius:12px;padding:22px 24px;margin-bottom:12px;">
           {overline("AI Expansion · Claude — reasoning space mode")}
           {heading("AI-generated alternative pathways", size="18px")}
           <div style="font-size:14px;color:#7c3aed;margin-bottom:16px;">
@@ -681,28 +729,38 @@ else:
         with ai_l:
             if ai.get("pac_warning"):
                 render(f"""
-                <div style="background:#fef2f2;border:1px solid #fca5a5;border-left:4px solid #dc2626;
-                    border-radius:12px;padding:18px 20px;margin-bottom:12px;">
+                <div style="background:#fef2f2;border:1px solid #fca5a5;border-left:4px solid #dc2626;border-radius:12px;padding:18px 20px;margin-bottom:12px;">
                   {overline("AI PAC warning")}
-                  <div style="font-size:14px;color:#374151;line-height:1.65;">{ai['pac_warning']}</div>
+                  <div style="font-size:14px;color:#374151;line-height:1.65;">{esc(ai['pac_warning'])}</div>
                 </div>
                 """)
 
             for i, path in enumerate(ai.get("alternative_pathways", [])):
-                colors = ["#7c3aed","#0891b2","#059669"]
-                bgs    = ["#f5f3ff","#ecfeff","#ecfdf5"]
-                bdrs   = ["#ddd6fe","#a5f3fc","#a7f3d0"]
-                c = colors[i % 3]; bg = bgs[i % 3]; bdr = bdrs[i % 3]
+                colors = ["#7c3aed", "#0891b2", "#059669"]
+                bgs = ["#f5f3ff", "#ecfeff", "#ecfdf5"]
+                bdrs = ["#ddd6fe", "#a5f3fc", "#a7f3d0"]
+                c = colors[i % 3]
+                bg = bgs[i % 3]
+                bdr = bdrs[i % 3]
+
+                title = esc(path.get("title", ""))
+                desc = esc(path.get("desc", ""))
+                question = esc(path.get("question", ""))
+
+                question_html = (
+                    f'<div style="padding:10px 12px;background:rgba(255,255,255,.7);border-radius:7px;border:1px solid {bdr};font-size:13px;color:#374151;font-style:italic;">{question}</div>'
+                    if question else ""
+                )
+
                 render(f"""
-                <div style="background:{bg};border:1px solid {bdr};border-left:4px solid {c};
-                    border-radius:12px;padding:18px 20px;margin-bottom:8px;">
+                <div style="background:{bg};border:1px solid {bdr};border-left:4px solid {c};border-radius:12px;padding:18px 20px;margin-bottom:8px;">
                   <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:6px;">
-                    ✨ {path.get('title','')}
+                    ✨ {title}
                   </div>
                   <div style="font-size:14px;color:#374151;line-height:1.65;margin-bottom:10px;">
-                    {path.get('desc','')}
+                    {desc}
                   </div>
-                  {f'<div style="padding:10px 12px;background:rgba(255,255,255,.7);border-radius:7px;border:1px solid {bdr};font-size:13px;color:#374151;font-style:italic;">{path["question"]}</div>' if path.get("question") else ""}
+                  {question_html}
                 </div>
                 """)
 
@@ -716,10 +774,10 @@ else:
                     render(f"""
                     <div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;">
                       <span style="color:#7c3aed;font-weight:700;flex-shrink:0;">→</span>
-                      <span style="font-size:14px;color:#374151;line-height:1.6;">{item}</span>
+                      <span style="font-size:14px;color:#374151;line-height:1.6;">{esc(item)}</span>
                     </div>
                     """)
-                render('</div>')
+                render("</div>")
 
             if ai.get("reopening_questions"):
                 render(f"""
@@ -730,7 +788,7 @@ else:
                     render(f"""
                     <div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;">
                       <span style="color:#d97706;font-weight:700;flex-shrink:0;">?</span>
-                      <span style="font-size:14px;color:#374151;line-height:1.6;">{q}</span>
+                      <span style="font-size:14px;color:#374151;line-height:1.6;">{esc(q)}</span>
                     </div>
                     """)
-                render('</div>')
+                render("</div>")
